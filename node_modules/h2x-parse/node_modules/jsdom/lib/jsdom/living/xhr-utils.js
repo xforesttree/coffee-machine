@@ -1,7 +1,6 @@
 "use strict";
 const request = require("request");
 const { EventEmitter } = require("events");
-const Event = require("./generated/Event");
 const ProgressEvent = require("./generated/ProgressEvent");
 const fs = require("fs");
 const { URL } = require("whatwg-url");
@@ -10,6 +9,7 @@ const parseDataURL = require("data-urls");
 const DOMException = require("domexception");
 const xhrSymbols = require("./xmlhttprequest-symbols");
 const wrapCookieJarForRequest = require("./helpers/wrap-cookie-jar-for-request");
+const { fireAnEvent } = require("./helpers/events");
 
 const headerListSeparatorRegexp = /,[ \t]*/;
 const simpleMethods = new Set(["GET", "HEAD", "POST"]);
@@ -46,19 +46,13 @@ function updateRequestHeader(requestHeaders, header, newValue) {
   }
 }
 
-function mergeHeaders(lhs, rhs) {
-  const rhsParts = rhs.split(",");
-  const lhsParts = lhs.split(",");
-  return rhsParts.concat(lhsParts.filter(p => rhsParts.indexOf(p) < 0)).join(",");
-}
-
 function dispatchError(xhr) {
   const errMessage = xhr[xhrSymbols.properties].error;
   requestErrorSteps(xhr, "error", new DOMException(errMessage, "NetworkError"));
 
   if (xhr._ownerDocument) {
     const error = new Error(errMessage);
-    error.type = "XMLHttpRequest";
+    error.type = "XMLHttpRequest"; // TODO this should become "resource loading" when XHR goes through resource loader
 
     xhr._ownerDocument._defaultView._virtualConsole.emit("jsdomError", error);
   }
@@ -113,19 +107,19 @@ function requestErrorSteps(xhr, event, exception) {
     throw exception;
   }
 
-  xhr.dispatchEvent(Event.create(["readystatechange"]));
+  fireAnEvent("readystatechange", xhr);
 
   if (!properties.uploadComplete) {
     properties.uploadComplete = true;
 
     if (properties.uploadListener) {
-      xhr.upload.dispatchEvent(ProgressEvent.create([event, { loaded: 0, total: 0, lengthComputable: false }]));
-      xhr.upload.dispatchEvent(ProgressEvent.create(["loadend", { loaded: 0, total: 0, lengthComputable: false }]));
+      fireAnEvent(event, xhr.upload, ProgressEvent, { loaded: 0, total: 0, lengthComputable: false });
+      fireAnEvent("loadend", xhr.upload, ProgressEvent, { loaded: 0, total: 0, lengthComputable: false });
     }
   }
 
-  xhr.dispatchEvent(ProgressEvent.create([event, { loaded: 0, total: 0, lengthComputable: false }]));
-  xhr.dispatchEvent(ProgressEvent.create(["loadend", { loaded: 0, total: 0, lengthComputable: false }]));
+  fireAnEvent(event, xhr, ProgressEvent, { loaded: 0, total: 0, lengthComputable: false });
+  fireAnEvent("loadend", xhr, ProgressEvent, { loaded: 0, total: 0, lengthComputable: false });
 }
 
 function setResponseToNetworkError(xhr) {
@@ -173,7 +167,6 @@ function createClient(xhr) {
     });
 
     readableStream.on("error", err => {
-      response.emit("error", err);
       client.emit("error", err);
     });
 
@@ -370,16 +363,7 @@ function createClient(xhr) {
         return;
       }
       const realClient = doRequest();
-      realClient.on("response", res => {
-        for (const header in resp.headers) {
-          if (preflightHeaders.has(header)) {
-            res.headers[header] = Object.prototype.hasOwnProperty.call(res.headers, header) ?
-                                  mergeHeaders(res.headers[header], resp.headers[header]) :
-                                  resp.headers[header];
-          }
-        }
-        client.emit("response", res);
-      });
+      realClient.on("response", res => client.emit("response", res));
       realClient.on("data", chunk => client.emit("data", chunk));
       realClient.on("end", () => client.emit("end"));
       realClient.on("abort", () => client.emit("abort"));
